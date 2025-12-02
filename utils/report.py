@@ -65,7 +65,7 @@ class ExperimentRegistry:
         df = pd.DataFrame(data)
         
         # Reorder columns for readability
-        cols = ['Method', 'Model', 'Train Samples', 'f1_weighted', 'accuracy', 'recall_weighted', 'latency_seconds']
+        cols = ['Method', 'Model', 'Dataset', 'Train Samples', 'f1_weighted', 'accuracy', 'recall_weighted', 'latency_seconds']
         # Only select columns that exist in the data
         cols = [c for c in cols if c in df.columns]
         df = df[cols]

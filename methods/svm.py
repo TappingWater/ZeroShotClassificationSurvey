@@ -1,21 +1,25 @@
 import time
-from datasets import load_dataset
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.svm import LinearSVC
+from utils.data import load_text_classification_dataset
 from utils.report import registry  # Import our generic reporter
 
-def run_svm():
-    print("🚀 Starting Supervised SVM Experiment...")
-    
-    # 1. Load Data
-    dataset = load_dataset("ag_news")
-    X_train = dataset['train']['text']
-    y_train = dataset['train']['label']
-    
-    # Using full test set
-    X_test = dataset['test']['text']
-    y_test = dataset['test']['label']
+# CONFIGURATION
+DATASET_NAME = "ag_news"  # Switch to "yahoo_answers_topics" to compare
+TRAIN_LIMIT = 120_000     # Set to None for full dataset (Yahoo is large; cap by default)
+TEST_LIMIT = 10_000       # Set to None for full test set
 
+
+def run_svm(dataset_name=DATASET_NAME, train_limit=TRAIN_LIMIT, test_limit=TEST_LIMIT):
+    print(f"🚀 Starting Supervised SVM Experiment ({dataset_name})...")
+    
+    # 1. Load Data (with optional limits)
+    X_train, y_train, X_test, y_test, _ = load_text_classification_dataset(
+        dataset_name,
+        train_limit=train_limit,
+        test_limit=test_limit,
+    )
+    
     start_time = time.time()
 
     # 2. Vectorization (TF-IDF)
@@ -44,8 +48,8 @@ def run_svm():
         tags={
             "Method": "Supervised",
             "Model": "LinearSVC",
-            "Dataset": "AG News",
-            "Train Samples": 120000
+            "Dataset": dataset_name,
+            "Train Samples": len(X_train)
         }
     )
 

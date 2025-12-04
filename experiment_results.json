@@ -339,5 +339,126 @@
         "f1_weighted": 0.9164,
         "recall_weighted": 0.9166,
         "latency_seconds": 5.62
+    },
+    {
+        "Method": "Zero-Shot NLI",
+        "Model": "valhalla/distilbart-mnli-12-3",
+        "Dataset": "ag_news",
+        "Train Samples": 0,
+        "timestamp": "2025-12-02 09:11:06",
+        "accuracy": 0.7363,
+        "f1_weighted": 0.7188,
+        "recall_weighted": 0.7363,
+        "latency_seconds": 374.6
+    },
+    {
+        "Method": "Embedding-Based Zero-Shot",
+        "Model": "sentence-transformers/all-MiniLM-L6-v2",
+        "Dataset": "ag_news",
+        "Train Samples": 0,
+        "timestamp": "2025-12-02 09:11:13",
+        "accuracy": 0.6796,
+        "f1_weighted": 0.6674,
+        "recall_weighted": 0.6796,
+        "latency_seconds": 3.01
+    },
+    {
+        "Method": "Supervised",
+        "Model": "LinearSVC",
+        "Dataset": "yahoo_answers_topics",
+        "Train Samples": 1400000,
+        "timestamp": "2025-12-02 09:17:58",
+        "accuracy": 0.7194,
+        "f1_weighted": 0.7138,
+        "recall_weighted": 0.7194,
+        "latency_seconds": 396.78
+    },
+    {
+        "Method": "Supervised",
+        "Model": "LinearSVC",
+        "Dataset": "ag_news",
+        "Train Samples": 120000,
+        "timestamp": "2025-12-04 08:49:47",
+        "accuracy": 0.9166,
+        "f1_weighted": 0.9164,
+        "recall_weighted": 0.9166,
+        "latency_seconds": 5.07
+    },
+    {
+        "Method": "Supervised",
+        "Model": "MultinomialNB",
+        "Dataset": "ag_news",
+        "Train Samples": 120000,
+        "timestamp": "2025-12-04 08:49:54",
+        "accuracy": 0.9046,
+        "f1_weighted": 0.9043,
+        "recall_weighted": 0.9046,
+        "latency_seconds": 2.4
+    },
+    {
+        "Method": "Zero-Shot NLI",
+        "Model": "valhalla/distilbart-mnli-12-3",
+        "Dataset": "ag_news",
+        "Train Samples": 0,
+        "timestamp": "2025-12-04 08:50:06",
+        "accuracy": 0.69,
+        "f1_weighted": 0.6883,
+        "recall_weighted": 0.69,
+        "latency_seconds": 5.49
+    },
+    {
+        "Method": "Embedding-Based Zero-Shot",
+        "Model": "sentence-transformers/all-MiniLM-L6-v2",
+        "Dataset": "ag_news",
+        "Train Samples": 0,
+        "timestamp": "2025-12-04 08:50:16",
+        "accuracy": 0.6796,
+        "f1_weighted": 0.6674,
+        "recall_weighted": 0.6796,
+        "latency_seconds": 3.0
+    },
+    {
+        "Method": "Supervised",
+        "Model": "LinearSVC",
+        "Dataset": "yahoo_answers_topics",
+        "Train Samples": 1400000,
+        "timestamp": "2025-12-04 08:56:57",
+        "accuracy": 0.7194,
+        "f1_weighted": 0.7138,
+        "recall_weighted": 0.7194,
+        "latency_seconds": 390.8
+    },
+    {
+        "Method": "Supervised",
+        "Model": "MultinomialNB",
+        "Dataset": "yahoo_answers_topics",
+        "Train Samples": 1400000,
+        "timestamp": "2025-12-04 08:58:08",
+        "accuracy": 0.6974,
+        "f1_weighted": 0.6937,
+        "recall_weighted": 0.6974,
+        "latency_seconds": 60.32
+    },
+    {
+        "Method": "Zero-Shot NLI",
+        "Model": "valhalla/distilbart-mnli-12-3",
+        "Dataset": "yahoo_answers_topics",
+        "Train Samples": 0,
+        "timestamp": "2025-12-04 08:58:32",
+        "accuracy": 0.53,
+        "f1_weighted": 0.5165,
+        "recall_weighted": 0.53,
+        "latency_seconds": 16.73
+    },
+    {
+        "Method": "Embedding-Based Zero-Shot",
+        "Model": "sentence-transformers/all-MiniLM-L6-v2",
+        "Dataset": "yahoo_answers_topics",
+        "Train Samples": 0,
+        "timestamp": "2025-12-04 08:59:28",
+        "accuracy": 0.532,
+        "f1_weighted": 0.5216,
+        "recall_weighted": 0.532,
+        "latency_seconds": 49.36
     }
 ]

@@ -1,4 +1,5 @@
 from methods.svm import run_svm
+from methods.nb import run_nb
 from methods.nli import run_nli
 from methods.embedding import run_sentence_transformer
 from utils.report import registry
@@ -8,13 +9,17 @@ DATASETS = {
     "ag_news": {
         "svm_train_limit": None,
         "svm_test_limit": None,
-        "nli_limit": None,
+        "nb_train_limit": None,
+        "nb_test_limit": None,
+        "nli_limit": 100,
         "embedding_test_limit": None,
     },
     "yahoo_answers_topics": {
         "svm_train_limit": None,   # Yahoo is large; cap for quicker runs
         "svm_test_limit": None,
-        "nli_limit": None,
+        "nb_train_limit": None,
+        "nb_test_limit": None,
+        "nli_limit": 100,
         "embedding_test_limit": None,
     },
 }
@@ -33,6 +38,16 @@ def main():
             )
         except Exception as e:
             print(f"Error running SVM on {dataset}: {e}")
+
+        # 1b. Run Supervised Naive Bayes Baseline
+        try:
+            run_nb(
+                dataset_name=dataset,
+                train_limit=cfg.get("nb_train_limit"),
+                test_limit=cfg.get("nb_test_limit"),
+            )
+        except Exception as e:
+            print(f"Error running Naive Bayes on {dataset}: {e}")
 
         # 2. Run Zero-Shot NLI
         try:

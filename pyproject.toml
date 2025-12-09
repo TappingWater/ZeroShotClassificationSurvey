@@ -7,7 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "datasets>=4.4.1",
     "multiprocess>=0.70.16",
+    "openai>=2.9.0",
     "pandas>=2.3.3",
+    "python-dotenv>=1.2.1",
     "scikit-learn>=1.7.2",
     "sentence-transformers>=3.1.0",
     "torch>=2.9.1",

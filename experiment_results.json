@@ -472,5 +472,39 @@
         "f1_weighted": 0.8686,
         "recall_weighted": 0.8692,
         "latency_seconds": 1703.44
+    },
+    {
+        "Method": "LLM Zero-Shot",
+        "Model": "gpt-5-nano",
+        "Dataset": "yahoo_answers_topics",
+        "Provider": "openai",
+        "Train Samples": 0,
+        "timestamp": "2025-12-12 03:43:41",
+        "accuracy": 0.4603,
+        "f1_weighted": 0.5522,
+        "recall_weighted": 0.4603,
+        "latency_seconds": 13723.39
+    },
+    {
+        "Method": "Zero-Shot NLI",
+        "Model": "valhalla/distilbart-mnli-12-3",
+        "Dataset": "yahoo_answers_topics",
+        "Train Samples": 0,
+        "timestamp": "2025-12-15 03:09:08",
+        "accuracy": 0.5504,
+        "f1_weighted": 0.5503,
+        "recall_weighted": 0.5504,
+        "latency_seconds": 17654.95
+    },
+    {
+        "Method": "Zero-Shot NLI",
+        "Model": "valhalla/distilbart-mnli-12-3",
+        "Dataset": "ag_news",
+        "Train Samples": 0,
+        "timestamp": "2025-12-15 08:01:20",
+        "accuracy": 0.7363,
+        "f1_weighted": 0.7188,
+        "recall_weighted": 0.7363,
+        "latency_seconds": 516.36
     }
 ]

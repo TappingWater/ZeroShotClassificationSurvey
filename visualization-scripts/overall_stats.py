@@ -3,7 +3,6 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import os
-import sys
 from datetime import datetime
 
 # Add project root to path to find experiment_results.json
@@ -21,11 +20,25 @@ def load_data():
     
     df = pd.DataFrame(data)
     
-    # Normalize Dataset names (case sensitivity)
-    df['Dataset'] = df['Dataset'].replace({
-        'ag_news': 'AG News',
-        'yahoo_answers_topics': 'Yahoo News'
-    })
+    # Normalize Dataset names (case sensitivity) BEFORE sorting/grouping
+    # This ensures "ag_news" and "AG News" are treated as the same dataset history
+    if 'Dataset' in df.columns:
+        df['Dataset'] = df['Dataset'].replace({
+            'ag_news': 'AG News',
+            'yahoo_answers_topics': 'Yahoo News',
+            'yahoo_answers': 'Yahoo News'
+        })
+
+    # Sort by timestamp to ensure we get the latest run
+    if 'timestamp' in df.columns:
+        df = df.sort_values('timestamp')
+
+    # Group by unique experiment identifiers and take the last one (latest)
+    df = df.groupby(['Dataset', 'Method', 'Model'], as_index=False).last()
+
+    # Apply Latency Multiplier for LLM methods
+    llm_mask = df['Method'].str.contains('LLM', case=False, na=False)
+    df.loc[llm_mask, 'latency_seconds'] = df.loc[llm_mask, 'latency_seconds'] * 10
     
     return df
 
@@ -35,106 +48,113 @@ def create_output_dir():
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
-def plot_combined_metrics(df, output_dir):
+def set_style(ax):
+    """Applies common style elements to an axis."""
+    ax.grid(True, axis='y', linestyle='--', alpha=0.6, color='gray')
+    ax.set_axisbelow(True)
+
+def plot_metrics(df, output_dir):
     """
-    Plots F1, Accuracy, and Recall side-by-side in one figure.
+    Plots F1, Accuracy, and Recall side-by-side in one figure (1x3).
     """
     metrics = [
-        ('f1_weighted', 'F1 Weighted Score'),
+        ('f1_weighted', 'Weighted F1 Score'),
         ('accuracy', 'Accuracy'),
-        ('recall_weighted', 'Recall Weighted')
+        ('recall_weighted', 'Weighted Recall')
     ]
     
-    # Create subplots: 1 row, 3 columns
-    fig, axes = plt.subplots(1, 3, figsize=(24, 8), sharey=True)
-    sns.set_theme(style="whitegrid")
-
-    # Get the best runs once to ensure consistent coloring across all plots
-    # We sort by F1 to pick the "best" run to represent each method/model
-    best_runs = df.sort_values('f1_weighted', ascending=False).groupby(['Dataset', 'Method', 'Model']).first().reset_index()
-    best_runs['Legend_Label'] = best_runs['Method'] + ": " + best_runs['Model']
-
-    # Get unique labels for the legend to ensure order if needed, 
-    # but seaborn handles hue matching automatically if data is same.
+    # Increase figure width to allow spacing
+    fig, axes = plt.subplots(1, 3, figsize=(22, 7), sharey=True)
     
+    # Use a clearer, distinct palette
+    sns.set_palette("Set2")
+    
+    df['Legend_Label'] = df['Method'] + ": " + df['Model']
+
     for i, (metric, title) in enumerate(metrics):
         ax = axes[i]
+        set_style(ax)
         
         sns.barplot(
-            data=best_runs,
+            data=df,
             x="Dataset",
             y=metric,
             hue="Legend_Label",
-            palette="viridis",
-            errorbar=None,
-            ax=ax
+            ax=ax,
+            width=0.6,
+            edgecolor="black", # Add border for clarity
+            linewidth=0.5
         )
         
-        ax.set_title(title, fontsize=16)
-        ax.set_xlabel('Dataset', fontsize=12)
-        ax.set_ylim(0, 1.0)
+        ax.set_title(title, fontsize=16, fontweight='bold', pad=15)
+        ax.set_xlabel('Dataset', fontsize=13)
+        ax.set_ylim(0, 1.05)
         
-        # Only show y-label for the first plot to save space
         if i == 0:
-            ax.set_ylabel('Score', fontsize=12)
+            ax.set_ylabel('Score', fontsize=13)
         else:
             ax.set_ylabel('')
 
-        # Remove individual legends; we'll add a global one
+        # Remove individual legends
         ax.get_legend().remove()
 
     # Add a single global legend
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='center right', bbox_to_anchor=(1.1, 0.5), title="Model", fontsize=12)
+    fig.legend(handles, labels, loc='center right', bbox_to_anchor=(1.12, 0.5), title="Model / Method", fontsize=11)
     
     plt.tight_layout()
-    # Adjust layout to make room for legend
-    plt.subplots_adjust(right=0.85)
+    # Adjust spacing between plots (wspace) and right margin for legend
+    plt.subplots_adjust(wspace=0.15, right=0.88)
     
-    output_path = os.path.join(output_dir, "combined_metrics_comparison.png")
-    plt.savefig(output_path, bbox_inches='tight')
-    print(f"Saved Combined Metrics plot to {output_path}")
+    output_path = os.path.join(output_dir, "performance_metrics.png")
+    plt.savefig(output_path, bbox_inches='tight', dpi=300)
+    print(f"Saved Metrics plot to {output_path}")
     plt.close()
 
 def plot_latency(df, output_dir):
-    plt.figure(figsize=(14, 8))
-    sns.set_theme(style="whitegrid")
+    """
+    Plots Latency separately.
+    """
+    plt.figure(figsize=(12, 7))
+    sns.set_palette("Set2")
     
-    best_runs = df.sort_values('f1_weighted', ascending=False).groupby(['Dataset', 'Method', 'Model']).first().reset_index()
-    best_runs['Legend_Label'] = best_runs['Method'] + ": " + best_runs['Model']
+    ax = plt.gca()
+    set_style(ax)
+    
+    df['Legend_Label'] = df['Method'] + ": " + df['Model']
 
-    chart = sns.barplot(
-        data=best_runs,
+    sns.barplot(
+        data=df,
         x="Dataset",
         y="latency_seconds",
         hue="Legend_Label",
-        palette="rocket",
-        errorbar=None
+        width=0.6,
+        edgecolor="black",
+        linewidth=0.5
     )
     
-    plt.title('Inference Latency by Model and Dataset (Log Scale)', fontsize=16)
-    plt.ylabel('Latency (seconds)', fontsize=12)
+    plt.title('Inference Latency (Log Scale) [LLM x10]', fontsize=16, fontweight='bold', pad=15)
+    plt.ylabel('Latency (seconds)', fontsize=13)
     plt.yscale('log')
-    plt.xlabel('Dataset', fontsize=12)
+    plt.xlabel('Dataset', fontsize=13)
     
-    plt.legend(bbox_to_anchor=(1.01, 1), loc='upper left', borderaxespad=0., title="Model")
+    plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0., title="Model / Method", fontsize=11)
     plt.tight_layout()
     
     output_path = os.path.join(output_dir, "latency_comparison.png")
-    plt.savefig(output_path)
+    plt.savefig(output_path, bbox_inches='tight', dpi=300)
     print(f"Saved Latency plot to {output_path}")
     plt.close()
 
 if __name__ == "__main__":
     df = load_data()
     if df is not None:
-        print("Data loaded. Generating plots...")
+        print("Data loaded. Latest runs per method:")
+        print(df[['Dataset', 'Method', 'f1_weighted', 'latency_seconds']])
+        
         out_dir = create_output_dir()
         
-        # Plot Combined Metrics (Side-by-Side)
-        plot_combined_metrics(df, out_dir)
-        
-        # Plot Latency (Separate)
+        plot_metrics(df, out_dir)
         plot_latency(df, out_dir)
         
         print("Done.")

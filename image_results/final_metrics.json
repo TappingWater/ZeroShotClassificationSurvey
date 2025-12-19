@@ -1,6 +1,0 @@
-{
-  "best_epoch": 36,
-  "best_val_macro": 0.2213864748110031,
-  "test_overall_acc": 0.22845468053491827,
-  "test_macro_acc": 0.2278625165842876
-}

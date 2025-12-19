@@ -13,18 +13,23 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from torchvision import transforms
+from torchvision.models import resnet18
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
 
 
+# CONFIG
+
 scratch_root = Path("/N/scratch/kisharma")
 hf_root = scratch_root / "hf_cache"
 
+# put your paths here
 os.environ["HF_HOME"] = str(hf_root)
 os.environ["HF_DATASETS_CACHE"] = str(hf_root / "datasets")
 os.environ["HF_HUB_CACHE"] = str(hf_root / "hub")
 os.environ["TRANSFORMERS_CACHE"] = str(hf_root / "transformers")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ.setdefault("TORCH_HOME", str(scratch_root / "torch_cache"))
 
 output_dir = Path("./image_results").resolve()
 output_dir.mkdir(parents=True, exist_ok=True)
@@ -39,22 +44,34 @@ train_classes = 100
 val_classes = 50
 test_classes = 50
 
-proto_images_per_class = 5
-train_captions_per_image = 10
-proto_captions_per_class = "all"  # "all" or an integer as string like "16"
+# Training caption sampling (per image, after splitting into sentences)
+train_captions_per_image = 10  # <=0 means "all available"
 
+# Image / text preprocessing
 img_size = 224
 max_len = 256
 bpe_vocab_size = 8000
 bpe_min_freq = 2
 
+# Model sizes
 embed_dim = 256
+dropout = 0.1
+
+# Text encoder choice: "transformer", "rnn", "lstm"
+TEXT_ENCODER_TYPE = "lstm"
+
+# Transformer params (used only if TEXT_ENCODER_TYPE == "transformer")
 text_layers = 4
 text_heads = 4
 text_ff_dim = 1024
-dropout = 0.1
 
-epochs = 30
+# RNN/LSTM params (used only if TEXT_ENCODER_TYPE in {"rnn","lstm"})
+rnn_hidden_dim = 256
+rnn_layers = 2
+rnn_bidirectional = True
+
+# Optimization
+epochs = 200
 batch_size = 512
 lr = 5e-4
 weight_decay = 1e-4
@@ -62,49 +79,72 @@ temperature = 0.07
 num_workers = 1
 use_amp = False
 
+# For debug 
+EVAL_TEXT_SOURCE = "class_captions"  # or "classname_prompts"
+EVAL_CAPTIONS_PER_CLASS = "all"      # "all" or an integer as string like "64"
 
-def set_seed(s: int) -> None:
+# For ablation, not used for the presentation 
+CLASSNAME_TEMPLATES = [
+    "a photo of a {}.",
+    "a photo of the bird {}.",
+    "a close-up photo of a {}.",
+    "a photo of a {} in the wild.",
+    "a bird called {}.",
+    "{}.",
+]
+
+
+
+def set_seed(s):
     random.seed(s)
     np.random.seed(s)
     torch.manual_seed(s)
     torch.cuda.manual_seed_all(s)
 
 
-def json_dump(obj, path: Path) -> None:
+def json_dump(obj, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
 
 
 def normalize_captions(val):
+    
+    def split_sentence_string(s):
+        s = " ".join((s or "").replace("\n", " ").strip().split())
+        if not s:
+            return []
+        parts = [p.strip() for p in s.split(".") if p.strip()]
+        return [p + "." for p in parts]
+
     if val is None:
         return []
+
     if isinstance(val, str):
-        s = val.strip()
-        return [s] if s else []
+        return split_sentence_string(val)
+
     if isinstance(val, (list, tuple)):
         out = []
         for x in val:
             if isinstance(x, str):
-                xs = x.strip()
-                if xs:
-                    out.append(xs)
+                out.extend(split_sentence_string(x))
         return out
+
     if isinstance(val, dict):
-        for k in ["text", "caption", "description", "sentence"]:
-            if k in val and isinstance(val[k], str):
-                s = val[k].strip()
-                return [s] if s else []
+        for k in ["text", "caption", "description", "sentence", "captions", "sentences", "descriptions"]:
+            if k in val and isinstance(val[k], (str, list, tuple)):
+                return normalize_captions(val[k])
+
     return []
 
 
-def pil_to_rgb(pil_img: Image.Image) -> Image.Image:
+def pil_to_rgb(pil_img):
     if pil_img.mode != "RGB":
         return pil_img.convert("RGB")
     return pil_img
 
 
-def detect_columns(example: dict):
+def detect_columns(example):
     keys = set(example.keys())
 
     image_candidates = ["image", "img", "pixel_values"]
@@ -135,12 +175,12 @@ def split_classes(label_ids, n_train, n_val, n_test, s):
     if n_train + n_val + n_test != len(uniq):
         raise ValueError(f"split sizes must sum to #classes. got {n_train+n_val+n_test} vs {len(uniq)}.")
     train_c = set(uniq[:n_train])
-    val_c = set(uniq[n_train : n_train + n_val])
-    test_c = set(uniq[n_train + n_val :])
+    val_c = set(uniq[n_train: n_train + n_val])
+    test_c = set(uniq[n_train + n_val:])
     return train_c, val_c, test_c
 
 
-def train_bpe_tokenizer(texts: list, tok_dir: Path, vocab_size: int, min_freq: int):
+def train_bpe_tokenizer(texts, tok_dir, vocab_size, min_freq):
     tok_dir.mkdir(parents=True, exist_ok=True)
     train_txt = tok_dir / "tokenizer_train.txt"
     with train_txt.open("w", encoding="utf-8") as f:
@@ -169,7 +209,7 @@ def train_bpe_tokenizer(texts: list, tok_dir: Path, vocab_size: int, min_freq: i
     return tok, pad_id, unk_id, bos_id, eos_id
 
 
-def encode_batch(tok: ByteLevelBPETokenizer, texts: list, max_len: int, pad_id: int, bos_id: int, eos_id: int):
+def encode_batch(tok, texts, max_len, pad_id, bos_id, eos_id):
     ids_list = []
     mask_list = []
     for t in texts:
@@ -190,42 +230,24 @@ def encode_batch(tok: ByteLevelBPETokenizer, texts: list, max_len: int, pad_id: 
     return torch.tensor(ids_list, dtype=torch.long), torch.tensor(mask_list, dtype=torch.long)
 
 
-class SimpleCNN(nn.Module):
-    def __init__(self, d: int):
+class ResNet18Encoder(nn.Module):
+    def __init__(self, d):
         super().__init__()
-        self.backbone = nn.Sequential(
-            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(3, stride=2, padding=1),
-
-            self._block(64, 128),
-            self._block(128, 256),
-            self._block(256, 512),
-
-            nn.AdaptiveAvgPool2d((1, 1)),
-        )
-        self.proj = nn.Linear(512, d)
-
-    @staticmethod
-    def _block(in_ch, out_ch):
-        return nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-        )
+        m = resnet18(weights=None)  # no pretrained weights, no download
+        in_dim = m.fc.in_features
+        m.fc = nn.Identity()
+        self.backbone = m
+        self.proj = nn.Linear(in_dim, d)
 
     def forward(self, x):
-        h = self.backbone(x).flatten(1)
+        h = self.backbone(x)
         z = self.proj(h)
         return F.normalize(z, dim=-1)
 
 
 class TextTransformer(nn.Module):
-    def __init__(self, vocab_size: int, d: int, n_layers: int, n_heads: int, ff_dim: int, max_len: int, drop: float, pad_id: int):
+    def __init__(self, vocab_size, d, n_layers, n_heads, ff_dim,
+                 max_len, drop, pad_id):
         super().__init__()
         self.pad_id = pad_id
         self.max_len = max_len
@@ -264,6 +286,99 @@ class TextTransformer(nn.Module):
         return F.normalize(pooled, dim=-1)
 
 
+class TextRNN(nn.Module):
+    def __init__(self, vocab_size, d, hidden, n_layers,
+                 bidir, max_len, drop, pad_id, cell):
+        super().__init__()
+        self.pad_id = pad_id
+        self.max_len = max_len
+        self.tok_emb = nn.Embedding(vocab_size, d, padding_idx=pad_id)
+
+        rnn_drop = drop if n_layers > 1 else 0.0
+        if cell == "rnn":
+            self.rnn = nn.RNN(
+                input_size=d,
+                hidden_size=hidden,
+                num_layers=n_layers,
+                batch_first=True,
+                dropout=rnn_drop,
+                bidirectional=bidir,
+                nonlinearity="tanh",
+            )
+        elif cell == "lstm":
+            self.rnn = nn.LSTM(
+                input_size=d,
+                hidden_size=hidden,
+                num_layers=n_layers,
+                batch_first=True,
+                dropout=rnn_drop,
+                bidirectional=bidir,
+            )
+        else:
+            raise ValueError(f"unknown cell={cell}")
+
+        out_dim = hidden * (2 if bidir else 1)
+        self.proj = nn.Linear(out_dim, d)
+        self.ln = nn.LayerNorm(d)
+
+    def forward(self, input_ids, attn_mask):
+        b, l = input_ids.shape
+        if l > self.max_len:
+            input_ids = input_ids[:, : self.max_len]
+            attn_mask = attn_mask[:, : self.max_len]
+            l = self.max_len
+
+        x = self.tok_emb(input_ids)  # (b,l,d)
+        out, _ = self.rnn(x)         # (b,l,out_dim)
+
+        attn = attn_mask.unsqueeze(-1).float()
+        pooled = (out * attn).sum(dim=1) / attn.sum(dim=1).clamp_min(1.0)
+
+        z = self.proj(pooled)
+        z = self.ln(z)
+        return F.normalize(z, dim=-1)
+
+
+def build_text_encoder(vocab_size, pad_id):
+    t = TEXT_ENCODER_TYPE.lower().strip()
+    if t == "transformer":
+        return TextTransformer(
+            vocab_size=vocab_size,
+            d=embed_dim,
+            n_layers=text_layers,
+            n_heads=text_heads,
+            ff_dim=text_ff_dim,
+            max_len=max_len,
+            drop=dropout,
+            pad_id=pad_id,
+        )
+    if t == "rnn":
+        return TextRNN(
+            vocab_size=vocab_size,
+            d=embed_dim,
+            hidden=rnn_hidden_dim,
+            n_layers=rnn_layers,
+            bidir=rnn_bidirectional,
+            max_len=max_len,
+            drop=dropout,
+            pad_id=pad_id,
+            cell="rnn",
+        )
+    if t == "lstm":
+        return TextRNN(
+            vocab_size=vocab_size,
+            d=embed_dim,
+            hidden=rnn_hidden_dim,
+            n_layers=rnn_layers,
+            bidir=rnn_bidirectional,
+            max_len=max_len,
+            drop=dropout,
+            pad_id=pad_id,
+            cell="lstm",
+        )
+    raise ValueError(f"Unknown TEXT_ENCODER_TYPE={TEXT_ENCODER_TYPE!r}")
+
+
 class ImageTextTrainDataset(Dataset):
     def __init__(self, hf_ds, records, image_col, image_tf, tokenizer, max_len, pad_id, bos_id, eos_id, k_caps):
         self.hf_ds = hf_ds
@@ -290,19 +405,14 @@ class ImageTextTrainDataset(Dataset):
         if not caps:
             cap = ""
         else:
-            kk = len(caps) if self.k_caps <= 0 else min(self.k_caps, len(caps))
+            if self.k_caps <= 0:
+                kk = len(caps)
+            else:
+                kk = min(self.k_caps, len(caps))
             cap = random.choice(caps[:kk])
 
         input_ids, attn_mask = encode_batch(self.tokenizer, [cap], self.max_len, self.pad_id, self.bos_id, self.eos_id)
         return img_t, input_ids[0], attn_mask[0], r["label_id"]
-
-
-def clip_loss(img_emb, txt_emb, tau: float):
-    logits = (img_emb @ txt_emb.t()) / tau
-    labels = torch.arange(logits.size(0), device=logits.device)
-    loss_i2t = F.cross_entropy(logits, labels)
-    loss_t2i = F.cross_entropy(logits.t(), labels)
-    return 0.5 * (loss_i2t + loss_t2i)
 
 
 def build_records(hf_ds, image_col, text_col, label_col):
@@ -316,15 +426,14 @@ def build_records(hf_ds, image_col, text_col, label_col):
         raw_lab = ex[label_col]
         caps = normalize_captions(ex[text_col])
 
-        key = i
-        if key not in grouped:
-            grouped[key] = {
+        if i not in grouped:
+            grouped[i] = {
                 "hf_index": i,
                 "label_raw": raw_lab,
                 "label_id": label_map[raw_lab],
                 "captions": [],
             }
-        grouped[key]["captions"].extend(caps)
+        grouped[i]["captions"].extend(caps)
 
     records = []
     for rec in grouped.values():
@@ -334,27 +443,35 @@ def build_records(hf_ds, image_col, text_col, label_col):
     return records, label_map
 
 
-def split_proto_query(records, class_set, proto_per_class, s):
-    rng = random.Random(s)
-    by_class = defaultdict(list)
-    for r in records:
-        if r["label_id"] in class_set:
-            by_class[r["label_id"]].append(r)
-
-    proto = []
-    query = []
-    for cid, lst in by_class.items():
-        rng.shuffle(lst)
-        p = min(proto_per_class, len(lst))
-        proto.extend(lst[:p])
-        query.extend(lst[p:])
-    return proto, query
+def clip_loss(img_emb, txt_emb, tau):
+    logits = (img_emb @ txt_emb.t()) / tau
+    labels = torch.arange(logits.size(0), device=logits.device)
+    loss_i2t = F.cross_entropy(logits, labels)
+    loss_t2i = F.cross_entropy(logits.t(), labels)
+    return 0.5 * (loss_i2t + loss_t2i)
 
 
 @torch.no_grad()
-def build_text_prototypes(txt_model, tok, hf_ds, records_proto, text_col, class_set, pad_id, bos_id, eos_id, max_len, proto_caps_per_class, device_):
+def build_classname_prototypes(txt_model, tok, id_to_label, class_set,
+                               pad_id, bos_id, eos_id, max_len, device_):
+    prototypes = {}
+    for cid in sorted(list(class_set)):
+        name = str(id_to_label[cid]).strip()
+        texts = [tpl.format(name) for tpl in CLASSNAME_TEMPLATES]
+
+        input_ids, attn_mask = encode_batch(tok, texts, max_len, pad_id, bos_id, eos_id)
+        e = txt_model(input_ids.to(device_), attn_mask.to(device_))
+        proto = F.normalize(e.mean(dim=0), dim=-1)
+        prototypes[cid] = proto.cpu()
+    return prototypes
+
+
+@torch.no_grad()
+def build_class_caption_prototypes(txt_model, tok, records, class_set,
+                                   pad_id, bos_id, eos_id, max_len,
+                                   captions_per_class, device_):
     by_class_caps = defaultdict(list)
-    for r in records_proto:
+    for r in records:
         cid = r["label_id"]
         if cid in class_set:
             by_class_caps[cid].extend(r["captions"])
@@ -365,37 +482,53 @@ def build_text_prototypes(txt_model, tok, hf_ds, records_proto, text_col, class_
         if not caps:
             caps = [""]
 
-        if proto_caps_per_class != "all":
-            m = int(proto_caps_per_class)
+        if captions_per_class != "all":
+            m = int(captions_per_class)
             caps = caps[:m]
 
         bs = 64
         embs = []
         for i in range(0, len(caps), bs):
-            chunk = caps[i : i + bs]
+            chunk = caps[i: i + bs]
             input_ids, attn_mask = encode_batch(tok, chunk, max_len, pad_id, bos_id, eos_id)
-            input_ids = input_ids.to(device_)
-            attn_mask = attn_mask.to(device_)
-            e = txt_model(input_ids, attn_mask)
+            e = txt_model(input_ids.to(device_), attn_mask.to(device_))
             embs.append(e)
+
         embs = torch.cat(embs, dim=0)
         proto = F.normalize(embs.mean(dim=0), dim=-1)
         prototypes[cid] = proto.cpu()
+
     return prototypes
 
 
+def make_class_prototypes(txt_model, tokenizer, id_to_label, records, class_set,
+                          pad_id, bos_id, eos_id, max_len, device_):
+    if EVAL_TEXT_SOURCE == "classname_prompts":
+        return build_classname_prototypes(
+            txt_model, tokenizer, id_to_label, class_set,
+            pad_id, bos_id, eos_id, max_len, device_
+        )
+    if EVAL_TEXT_SOURCE == "class_captions":
+        return build_class_caption_prototypes(
+            txt_model, tokenizer, records, class_set,
+            pad_id, bos_id, eos_id, max_len, EVAL_CAPTIONS_PER_CLASS, device_
+        )
+    raise ValueError(f"Unknown EVAL_TEXT_SOURCE={EVAL_TEXT_SOURCE!r}")
+
+
 @torch.no_grad()
-def zsl_eval(img_model, txt_protos, hf_ds, query_records, image_col, image_tf_eval, class_set, device_, bs=128):
+def zsl_eval(img_model, class_protos, hf_ds, eval_records,
+             image_col, image_tf_eval, class_set, device_, bs=128):
     class_list = sorted(list(class_set))
-    proto_mat = torch.stack([txt_protos[c] for c in class_list], dim=0).to(device_)
+    proto_mat = torch.stack([class_protos[c] for c in class_list], dim=0).to(device_)
 
     correct_per_class = defaultdict(int)
     total_per_class = defaultdict(int)
     overall_correct = 0
     overall_total = 0
 
-    for i in range(0, len(query_records), bs):
-        batch = query_records[i : i + bs]
+    for i in range(0, len(eval_records), bs):
+        batch = eval_records[i: i + bs]
         imgs = []
         labels = []
         for r in batch:
@@ -434,6 +567,7 @@ def zsl_eval(img_model, txt_protos, hf_ds, query_records, image_col, image_tf_ev
 def main():
     set_seed(seed)
 
+    # Load dataset
     if dataset_split is None:
         ds_dict = load_dataset(dataset_name)
         if isinstance(ds_dict, dict) and "train" in ds_dict:
@@ -447,9 +581,11 @@ def main():
     else:
         hf_ds = load_dataset(dataset_name, split=dataset_split)
 
+    # Detect columns
     ex0 = hf_ds[0]
     image_col, text_col, label_col = detect_columns(ex0)
 
+    # Build per-image records (captions split into sentence chunks)
     records, label_map = build_records(hf_ds, image_col, text_col, label_col)
     label_ids = [r["label_id"] for r in records]
     n_classes = len(set(label_ids))
@@ -465,9 +601,9 @@ def main():
     val_records = [r for r in records if r["label_id"] in val_c]
     test_records = [r for r in records if r["label_id"] in test_c]
 
-    val_proto, val_query = split_proto_query(val_records, val_c, proto_images_per_class, seed + 1)
-    test_proto, test_query = split_proto_query(test_records, test_c, proto_images_per_class, seed + 2)
+    id_to_label = {i: lab for lab, i in label_map.items()}
 
+    # Save split metadata
     split_meta = {
         "dataset": dataset_name,
         "image_col": image_col,
@@ -477,24 +613,27 @@ def main():
         "train_classes": sorted(list(train_c)),
         "val_classes": sorted(list(val_c)),
         "test_classes": sorted(list(test_c)),
-        "proto_images_per_class": proto_images_per_class,
         "num_records": len(records),
         "num_train_records": len(train_records),
         "num_val_records": len(val_records),
         "num_test_records": len(test_records),
-        "num_val_proto": len(val_proto),
-        "num_val_query": len(val_query),
-        "num_test_proto": len(test_proto),
-        "num_test_query": len(test_query),
+        "eval_text_source": EVAL_TEXT_SOURCE,
+        "eval_captions_per_class": EVAL_CAPTIONS_PER_CLASS if EVAL_TEXT_SOURCE == "class_captions" else None,
+        "classname_templates": CLASSNAME_TEMPLATES if EVAL_TEXT_SOURCE == "classname_prompts" else None,
+        "text_encoder_type": TEXT_ENCODER_TYPE,
     }
     json_dump(split_meta, output_dir / "splits.json")
 
+    # Train tokenizer on training captions only
     train_texts = []
     for r in train_records:
         caps = r["captions"]
         if not caps:
             continue
-        kk = len(caps) if train_captions_per_image <= 0 else min(train_captions_per_image, len(caps))
+        if train_captions_per_image <= 0:
+            kk = len(caps)
+        else:
+            kk = min(train_captions_per_image, len(caps))
         train_texts.extend(caps[:kk])
 
     tok_dir = output_dir / "tokenizer"
@@ -503,6 +642,7 @@ def main():
     )
     vocab_size = len(tokenizer.get_vocab())
 
+    # Transforms
     image_tf_train = transforms.Compose(
         [
             transforms.RandomResizedCrop(img_size, scale=(0.8, 1.0)),
@@ -520,6 +660,7 @@ def main():
         ]
     )
 
+    # Train loader
     train_ds = ImageTextTrainDataset(
         hf_ds=hf_ds,
         records=train_records,
@@ -541,19 +682,15 @@ def main():
         drop_last=True,
     )
 
-    img_model = SimpleCNN(d=embed_dim).to(device)
-    txt_model = TextTransformer(
-        vocab_size=vocab_size,
-        d=embed_dim,
-        n_layers=text_layers,
-        n_heads=text_heads,
-        ff_dim=text_ff_dim,
-        max_len=max_len,
-        drop=dropout,
-        pad_id=pad_id,
-    ).to(device)
+    # Models
+    img_model = ResNet18Encoder(d=embed_dim).to(device)
+    txt_model = build_text_encoder(vocab_size=vocab_size, pad_id=pad_id).to(device)
 
-    opt = torch.optim.AdamW(list(img_model.parameters()) + list(txt_model.parameters()), lr=lr, weight_decay=weight_decay)
+    opt = torch.optim.AdamW(
+        list(img_model.parameters()) + list(txt_model.parameters()),
+        lr=lr,
+        weight_decay=weight_decay,
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=bool(use_amp))
 
     best_val_macro = -1.0
@@ -563,6 +700,7 @@ def main():
     if log_path.exists():
         log_path.unlink()
 
+    # Training loop
     for epoch in range(1, epochs + 1):
         img_model.train()
         txt_model.train()
@@ -591,15 +729,18 @@ def main():
 
         train_loss = running / max(1, n_steps)
 
+        # ZSL validation (unseen val classes)
         img_model.eval()
         txt_model.eval()
 
-        val_protos = build_text_prototypes(
-            txt_model, tokenizer, hf_ds, val_proto, text_col, val_c,
-            pad_id, bos_id, eos_id, max_len, proto_captions_per_class, device
+        val_protos = make_class_prototypes(
+            txt_model, tokenizer, id_to_label, val_records, val_c,
+            pad_id, bos_id, eos_id, max_len, device
         )
         val_overall, val_macro = zsl_eval(
-            img_model, val_protos, hf_ds, val_query, image_col, image_tf_eval, val_c, device, bs=min(256, batch_size)
+            img_model, val_protos, hf_ds, val_records,
+            image_col, image_tf_eval, val_c,
+            device, bs=min(256, batch_size)
         )
 
         with log_path.open("a", encoding="utf-8") as f:
@@ -625,6 +766,7 @@ def main():
                     "vocab_size": vocab_size,
                     "split_meta": split_meta,
                     "best_val_macro": best_val_macro,
+                    "text_encoder_type": TEXT_ENCODER_TYPE,
                 },
                 best_path,
             )
@@ -634,18 +776,22 @@ def main():
             f"val zsl acc {val_overall:.4f} | val zsl macro {val_macro:.4f} | best {best_val_macro:.4f}"
         )
 
+    # Load best model
     ckpt = torch.load(best_path, map_location="cpu")
     img_model.load_state_dict(ckpt["img_model"])
     txt_model.load_state_dict(ckpt["txt_model"])
     img_model.to(device).eval()
     txt_model.to(device).eval()
 
-    test_protos = build_text_prototypes(
-        txt_model, tokenizer, hf_ds, test_proto, text_col, test_c,
-        pad_id, bos_id, eos_id, max_len, proto_captions_per_class, device
+    # ZSL test (unseen test classes)
+    test_protos = make_class_prototypes(
+        txt_model, tokenizer, id_to_label, test_records, test_c,
+        pad_id, bos_id, eos_id, max_len, device
     )
     test_overall, test_macro = zsl_eval(
-        img_model, test_protos, hf_ds, test_query, image_col, image_tf_eval, test_c, device, bs=min(256, batch_size)
+        img_model, test_protos, hf_ds, test_records,
+        image_col, image_tf_eval, test_c,
+        device, bs=min(256, batch_size)
     )
 
     json_dump(
@@ -654,6 +800,9 @@ def main():
             "best_val_macro": float(ckpt["best_val_macro"]),
             "test_overall_acc": float(test_overall),
             "test_macro_acc": float(test_macro),
+            "eval_text_source": EVAL_TEXT_SOURCE,
+            "eval_captions_per_class": EVAL_CAPTIONS_PER_CLASS if EVAL_TEXT_SOURCE == "class_captions" else None,
+            "text_encoder_type": TEXT_ENCODER_TYPE,
         },
         output_dir / "final_metrics.json",
     )

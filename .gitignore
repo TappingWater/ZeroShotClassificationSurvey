@@ -4,3 +4,8 @@ __pycache__/*
 .env
 plots/*
 share/*
+*.pt  
+image_results/*
+gan_results/*
+cache/*
+*.sh

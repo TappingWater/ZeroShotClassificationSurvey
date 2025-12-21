@@ -14,7 +14,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
 
 from torchvision import transforms
-from torchvision.models import resnet101, ResNet101_Weights
+from torchvision.models import resnet18, ResNet18_Weights
 from datasets import load_dataset
 # Use raw transformers for better control
 from transformers import AutoTokenizer, AutoModel
@@ -58,12 +58,12 @@ img_size = 224
 # GAN Params
 z_dim = 100         # Noise dimension
 embed_dim = 384     # MiniLM dimension
-feature_dim = 2048  # ResNet101 penultimate layer
+feature_dim = 512   # ResNet18 output
 n_epochs = 50       # Reduced epochs as SBERT is strong
-batch_size = 64
+batch_size = 128
 lr = 0.0001
 beta1 = 0.5
-cls_weight = 0.1    # Classification loss weight
+cls_weight = 5.0    # Increased Semantic Consistency Weight
 lambda_gp = 10      # Gradient penalty lambda
 
 def set_seed(s):
@@ -88,10 +88,10 @@ def get_random_embeddings(records, embed_dim):
 # --- MODELS ---
 
 class FeatureExtractor(nn.Module):
-    """Pre-trained ResNet101 to extract 2048-dim features."""
+    """Pre-trained ResNet18 to extract 512-dim features."""
     def __init__(self):
         super(FeatureExtractor, self).__init__()
-        model = resnet101(weights=ResNet101_Weights.IMAGENET1K_V1)
+        model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
         self.model = nn.Sequential(*list(model.children())[:-1]) # Remove fc layer
         self.model.eval() # Freeze
 
@@ -107,12 +107,13 @@ class Generator(nn.Module):
         self.fc1 = nn.Linear(z_dim + embed_dim, 4096)
         self.fc2 = nn.Linear(4096, feature_dim)
         self.activation = nn.LeakyReLU(0.2, inplace=True)
-        self.relu = nn.ReLU(inplace=True)
+        # Removed ReLU at output (Linear)
 
     def forward(self, noise, text_embedding):
         x = torch.cat([noise, text_embedding], dim=1)
         x = self.activation(self.fc1(x))
-        x = self.relu(self.fc2(x)) # Features are typically > 0 after ReLU in ResNet? No, ResNet AvgPool output is >=0 because of previous ReLU.
+        x = self.fc2(x) # Linear Output (better for WGAN)
+        x = F.normalize(x, p=2, dim=1)
         return x
 
 class Discriminator(nn.Module):
@@ -343,7 +344,7 @@ def main():
     ])
     
     # Check if features cached
-    feat_cache = output_dir / "resnet101_features.pt"
+    feat_cache = output_dir / "resnet18_features.pt"
     if feat_cache.exists():
         print("Loading cached visual features...")
         cache = torch.load(feat_cache)
@@ -352,6 +353,10 @@ def main():
     else:
         all_features, all_labels_t = extract_features(hf_ds, records, image_col, image_tf, device)
         torch.save({"features": all_features, "labels": all_labels_t}, feat_cache)
+    
+    # PATCH: NORMALIZE FEATURES (L2)
+    print("Normalizing visual features (L2)...")
+    all_features = F.normalize(all_features, p=2, dim=1)
     
     X_train = all_features[train_indices]
     y_train = all_labels_t[train_indices]
@@ -428,7 +433,7 @@ def main():
         res = {
             "zsl_gan_acc": acc,
             "model": "supervised_upper_bound",
-            "feature_extractor": "resnet101"
+            "feature_extractor": "resnet18"
         }
         out_path = Path(args.output_file)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,12 +466,24 @@ def main():
     aux_ds = torch.utils.data.TensorDataset(X_train.to(device), y_train_local.to(device))
     aux_loader = DataLoader(aux_ds, batch_size=128, shuffle=True)
     
-    for ep in range(10): # Quick train
+    for ep in range(50): # Quick train
         for bx, by in aux_loader:
             aux_opt.zero_grad()
             loss = F.nll_loss(cls_aux(bx), by)
             loss.backward()
             aux_opt.step()
+
+            if ep % 10 == 0:
+                cls_aux.eval()
+                correct = 0
+                total = 0
+                with torch.no_grad():
+                    for bx, by in aux_loader:
+                        preds = cls_aux(bx).argmax(dim=1)
+                        correct += (preds == by).sum().item()
+                        total += by.size(0)
+                print(f"Aux Classifier Epoch {ep}: Acc = {correct/total:.4f}")
+
     cls_aux.eval()
     
     # 5. GAN Setup
@@ -482,8 +499,8 @@ def main():
     netG = Generator().to(device)
     netD = Discriminator().to(device)
     
-    optG = torch.optim.Adam(netG.parameters(), lr=lr, betas=(beta1, 0.999))
-    optD = torch.optim.Adam(netD.parameters(), lr=lr, betas=(beta1, 0.999))
+    optG = torch.optim.Adam(netG.parameters(), lr=lr, betas=(0.0, 0.9))
+    optD = torch.optim.Adam(netD.parameters(), lr=lr, betas=(0.0, 0.9))
     
     print("Starting GAN Training...")
     
@@ -567,18 +584,22 @@ def main():
     for c in test_c:
         if c not in test_class_embs: continue
         all_c = torch.cat(test_class_embs[c], dim=0) # (TotalCaps, E)
-        proto = torch.mean(all_c, dim=0, keepdim=True).to(device) # Mean Prototype
         
-        # Or better: Sample random captions from the class to capture diversity
-        # But Proto is safer for Zero-Shot
-        
-        for _ in range(items_per_class // batch_size + 1):
-             z = torch.randn(batch_size, z_dim).to(device)
-             txt = proto.repeat(batch_size, 1) # Use prototype
+        # New Logic: Sample RANDOM captions instead of averaging (Prototype)
+        cnt = 0
+        while cnt < items_per_class:
+             cur_bs = min(batch_size, items_per_class - cnt)
+             z = torch.randn(cur_bs, z_dim).to(device)
+             
+             # Randomly sample 'cur_bs' captions from all_c
+             idx = torch.randint(0, all_c.size(0), (cur_bs,))
+             txt = all_c[idx].to(device)
+             
              with torch.no_grad():
                  gen = netG(z, txt)
              syn_feats.append(gen.cpu())
-             syn_labels.extend([c] * batch_size)
+             syn_labels.extend([c] * cur_bs)
+             cnt += cur_bs
     
     X_syn = torch.cat(syn_feats, dim=0)
     y_syn = torch.tensor(syn_labels)
@@ -632,7 +653,7 @@ def main():
         "model": args.model_type,
         "captions_per_image": args.captions_per_image,
         "num_seen_classes": args.num_seen_classes,
-        "feature_extractor": "resnet101"
+        "feature_extractor": "resnet18"
     }
     
     out_path = Path(args.output_file)

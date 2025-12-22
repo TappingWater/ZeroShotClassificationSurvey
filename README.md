@@ -1,6 +1,15 @@
 # Zero-Shot Classification Survey Experiment
 
-This project benchmarks Zero-Shot Classification (using NLI) against traditional Supervised Learning (using SVM) on the AG News dataset.
+This project benchmarks Zero-Shot Classification.
+
+The code for:
+
+- the zero shot learning joint embedding method is at image/train_zsl_image.py.
+
+- the GAN based zero shot learning method is at image/train_gan_zsl.py.
+
+Other code for zero shot classification on the text datasets is in the text folder.
+
 
 ## Dependencies
 
